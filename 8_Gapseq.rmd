@@ -1,0 +1,239 @@
+---
+title: "metabolic model"
+author: "XYM"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(indicspecies)
+library(superheat)
+library(readxl)
+library(purrr)
+library(tibble)
+```
+
+
+#read pathway tbl
+```{r}
+#high
+Sphingopyxis_pwy <- fread("../gapseq/4genome/Sphingopyxis/Sphingopyxis-all-Pathways.tbl")
+Bacillus_pwy <- fread("../gapseq/4genome/Bacillus/Bacillus-all-Pathways.tbl")
+#low
+Paraburkholderia_pwy <- fread("../gapseq/4genome/Paraburkholderia/Paraburkholderia-all-Pathways.tbl")
+Ralstonia_pwy <- fread("../gapseq/4genome/Ralstonia/Ralstonia-all-Pathways.tbl")
+
+#merge into one 
+lst <- list(
+  Sphingopyxis_sp001990265= Sphingopyxis_pwy,
+  Bacillus_pumilus = Bacillus_pwy,
+  Ralstonia_insidiosa = Ralstonia_pwy,
+  Paraburkholderia_tropica = Paraburkholderia_pwy
+)
+
+clean_tbl <- function(df) {
+  df %>%
+    dplyr::select(Name, ID, Prediction) %>%
+    mutate(Prediction = ifelse(tolower(Prediction) == "true", 1, 0))
+}
+lst2 <- map(lst, clean_tbl)
+df_merged <- reduce(lst2, function(x, y) full_join(x, y, by = c("ID", "Name")))
+#re-name
+colnames(df_merged) <- c(
+  "Pathway", "ID",
+  names(lst)   # Sphingopyxis, Bacillus, Paraburkholderia, Ralstonia
+)
+
+#write.csv(df_merged, '../gapseq/pathway.csv')
+```
+
+#vsurf
+```{r}
+library(VSURF)
+#risk score from survival script
+#write.csv(dat, '../gapseq/meta_data_risk_score.csv')
+meta <- read.csv("../gapseq/meta_data_risk_score.csv", check.names = FALSE)
+meta <- meta[, -1]
+#rownames(meta) <- meta$sampleID
+# add new name of the samples: p1- p38
+meta <- meta %>%
+  arrange(Order)
+meta <- meta %>%
+  mutate(plot_name = paste0("P", seq_len(n())))
+rownames(meta) <- meta$plot_name
+
+# order by risk score
+meta <- meta %>% arrange(risk_score)
+
+y <- meta$risk_score
+names(y) <- meta$plot_name
+
+# abund data
+four_taxa <- c(
+  "Bacteria;Proteobacteria;Alphaproteobacteria;Sphingomonadales;Sphingomonadaceae;Sphingopyxis;Sphingopyxis_sp001990265",
+  "Bacteria;Firmicutes;Bacilli;Bacillales;Bacillaceae;Bacillus;Bacillus_pumilus",
+  "Bacteria;Proteobacteria;Gammaproteobacteria;Burkholderiales;Burkholderiaceae;Ralstonia;Ralstonia_insidiosa",
+  "Bacteria;Proteobacteria;Gammaproteobacteria;Burkholderiales;Burkholderiaceae;Paraburkholderia;Paraburkholderia_tropica"
+)
+
+X_abund <- meta[, four_taxa, drop = FALSE]
+
+# reorder
+X_abund <- X_abund[match(meta$plot_name, rownames(X_abund)), ]
+stopifnot(all(rownames(X_abund) == meta$plot_name))
+colnames(X_abund) <- c(
+  "Sphingopyxis_sp001990265",
+  "Bacillus_pumilus",
+  "Ralstonia_insidiosa",
+  "Paraburkholderia_tropica"
+)
+
+
+#get pathway genome
+pathway_genome <- df_merged %>%
+  dplyr::select(Pathway,
+                Sphingopyxis_sp001990265,
+                Bacillus_pumilus,
+                Ralstonia_insidiosa,
+                Paraburkholderia_tropica
+                ) %>%
+  column_to_rownames("Pathway")
+stopifnot(identical(colnames(X_abund), colnames(pathway_genome)))
+#
+
+#  get pathway abundance 
+# (samples × bacteria matrix) %*% (bacteria × pathway matrix)
+X_pathway_abund <- as.matrix(X_abund) %*% t(as.matrix(pathway_genome))
+
+rownames(X_pathway_abund) <- rownames(X_abund)
+colnames(X_pathway_abund) <- rownames(pathway_genome)
+
+X_pathway_abund <- as.data.frame(X_pathway_abund)
+
+
+
+#VSURF
+set.seed(123)  
+
+vsurf_path <- VSURF(
+  x        = X_pathway_abund,
+  y        = y,
+  parallel = T  
+)
+# The pathway orders in the results are different everytime, because we used parallel. But the Top pathways are the same.
+vsurf_path
+# get table
+imp_df <- data.frame(
+  rank    = vsurf_path$imp.mean.dec.ind,
+  pathway = colnames(X_pathway_abund)[vsurf_path$imp.mean.dec.ind],
+  imp_mean= vsurf_path$imp.mean.dec,
+  imp_sd  = vsurf_path$imp.sd.dec,
+  stringsAsFactors = FALSE
+)
+
+head(imp_df, 20)
+#write.csv(imp_df, "../gapseq/VSURF_pathway_importance_risk_score.csv", row.names = FALSE)
+#plot
+top_n <- 20
+top_imp <- imp_df[1:top_n, ]
+top_imp$pathway <- factor(top_imp$pathway, levels = rev(top_imp$pathway))
+
+ggplot(top_imp, aes(x = imp_mean, y = pathway)) +
+  geom_col(fill = "steelblue") +
+  labs(x = "VSURF importance (mean decrease)", y = "Pathway") +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 8),
+    panel.grid  = element_blank()
+  )
+
+```
+
+# complex heatmap
+```{r}
+
+X_pathway_abund_filt <- X_pathway_abund
+
+mat0 <- as.matrix(X_pathway_abund_filt)
+storage.mode(mat0) <- "numeric"
+
+bad_col <- apply(mat0, 2, function(z) any(is.na(z) | is.infinite(z)))
+mat0 <- mat0[, !bad_col, drop = FALSE]
+
+zero_sd <- apply(mat0, 2, sd, na.rm = TRUE) == 0
+mat0 <- mat0[, !zero_sd, drop = FALSE]
+
+X_pathway_abund_filt <- as.data.frame(mat0)
+
+meta2 <- meta[match(rownames(X_pathway_abund_filt), meta$plot_name), ]
+
+med <- median(meta2$risk_score, na.rm = TRUE)
+meta2$risk_group <- ifelse(meta2$risk_score >= med, "High risk", "Low risk")
+meta2$risk_group <- factor(meta2$risk_group, levels = c("Low risk", "High risk"))
+
+annotation_col <- data.frame(
+  RiskGroup = meta2$risk_group
+)
+rownames(annotation_col) <- meta2$plot_name
+
+ann_colors <- list(
+  RiskGroup = c(
+    "Low risk"  = "#5DAF85",  
+    "High risk" = "#FD9919"   
+  )
+)
+
+mat <- as.matrix(X_pathway_abund_filt)
+mode(mat) <- "numeric"
+mat2 <- t(mat)
+
+top30 <- head(imp_df[order(imp_df$imp_mean, decreasing = TRUE), ], 30)
+top30_pathways <- top30$pathway
+mat2_top30 <- mat2[top30_pathways, , drop = FALSE]
+
+abund_colors <- colorRampPalette(c(
+  "#5E8DB6",  
+  "#FFFFFF",  
+  "#DDA39A"   
+))(200)
+
+
+pdf("../gapseq/vsurf_heatmap_top30_tricolor.pdf", width = 11, height = 5.5)
+
+pheatmap(
+  mat2_top30,
+  cluster_cols = TRUE,
+  cluster_rows = F,
+  clustering_distance_cols = "euclidean",
+  clustering_distance_rows = "euclidean",
+  clustering_method = "average",
+  color = abund_colors,
+  legend = TRUE,
+  legend_labels = "Pathway abundance",   
+  legend_breaks = NA,                
+  fontsize = 10,
+  fontsize_row = 10,
+  fontsize_col = 10,
+  angle_col = 45,
+  border_color = 'grey',
+  annotation_col = annotation_col,
+  annotation_colors = ann_colors,
+  annotation_names_row = FALSE,
+  annotation_legend = TRUE,
+  treeheight_col = 10#,
+  # cellwidth = 4,
+  # cellheight = 4
+)
+
+dev.off()
+```
+

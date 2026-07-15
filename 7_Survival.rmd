@@ -1,0 +1,614 @@
+---
+title: "Survival"
+author: "XYM"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# repeated cv,  not 5 fold only!   repeat 500
+```{r}
+library(phyloseq)
+library(dplyr)
+library(survival)
+library(survminer)
+library(glmnet)
+library(ggplot2)
+library(compositions)   # CLR transformation
+
+## continue
+physeq <- readRDS("../Output/physeq.rds")
+
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+otu  <- as.data.frame(otu_table(physeq))
+
+# Fix survival time = 0 → 1 (otherwise Cox model will get error)
+meta$survival_months[ meta$Sample_id == "D1413D" ] <- 1
+
+
+## OTU table
+if (taxa_are_rows(physeq)) {
+  otu <- t(otu)
+  otu <- as.data.frame(otu)
+}
+
+meta$sampleID <- rownames(meta)
+otu$sampleID  <- rownames(otu)
+
+## Prevalence filter 10%
+
+otu_only <- otu %>% select(-sampleID)
+otu_only <- as.data.frame(otu_only)
+
+min_prevalence <- ceiling(0.10 * nrow(otu_only))
+keep_taxa <- names(which(colSums(otu_only > 0) >= min_prevalence))
+
+otu_filt <- otu_only[, keep_taxa, drop = FALSE]
+cat("Taxa after filtering:", length(keep_taxa), "\n")
+
+##  CLR transformation
+otu_filt_num <- apply(otu_filt, 2, function(x) as.numeric(as.character(x)))
+otu_filt_num <- as.data.frame(otu_filt_num)
+
+otu_clr_mat <- clr(otu_filt_num + 1e-6) # aviod log0
+otu_clr <- as.data.frame(otu_clr_mat)
+
+otu_clr$sampleID <- rownames(otu_filt)
+
+## Merge with metadata 
+dat <- merge(meta, otu_clr, by = "sampleID")
+
+time_col   <- "survival_months"
+status_col <- "vital_status"
+age_col    <- "age_MBC_dx"
+
+taxa <- keep_taxa
+
+X <- as.matrix(dat[, taxa])
+y <- Surv(dat[[time_col]], dat[[status_col]])
+
+## ======================  500 Repeated 5-fold CV  ====================
+n_repeats <- 500      # repeat 500 
+alpha_val <- seq(0.1, 0.9, by = 0.1)
+nfolds_val <- 5
+
+p <- ncol(X)
+feature_mat <- matrix(0, nrow = n_repeats, ncol = p)
+colnames(feature_mat) <- taxa
+
+lambda_vec <- numeric(n_repeats)
+cindex_vec <- numeric(n_repeats)
+alpha_vec  <- numeric(n_repeats)
+
+for (i in 1:n_repeats) {
+
+  # Randomly pick an alpha 
+  a <- sample(alpha_val, 1)
+  alpha_vec[i] <- a
+
+  set.seed(1000 + i)
+  cvfit <- cv.glmnet(
+    X, y,
+    family = "cox",
+    alpha = a,
+    type.measure = "C",
+    nfolds = nfolds_val
+  )
+
+  lambda_vec[i] <- cvfit$lambda.min
+  cindex_vec[i] <- max(cvfit$cvm)
+
+  # Refit the model with best lambda 
+  fit_i <- glmnet(
+    X, y,
+    family = "cox",
+    alpha = a,
+    lambda = cvfit$lambda.min
+  )
+
+  coef_i <- as.numeric(coef(fit_i))
+  feature_mat[i, ] <- coef_i != 0
+}
+
+## feature selection frequency 
+freq <- colSums(feature_mat) / n_repeats
+freq_df <- data.frame(taxon = taxa, freq = freq)
+freq_df <- freq_df[order(-freq_df$freq), ]
+
+print(head(freq_df, 20))
+
+## Choose stable features (freq > 0.5 )
+stable_features <- freq_df$taxon[freq_df$freq > 0.5]
+
+cat("Stable selected taxa:", length(stable_features), "\n")
+print(stable_features)
+
+
+## final Elastic-Net Cox model on full dataset
+X_final <- as.matrix(dat[, stable_features])
+
+final_model <- coxph(
+  Surv(dat[[time_col]], dat[[status_col]]) ~ .,
+  data = as.data.frame(X_final)
+)
+
+summary(final_model)
+
+
+## risk score
+risk_score <- predict(final_model, type = "lp")  
+dat$risk_score <- risk_score
+## multivariable Cox with adjustment ,   not necessary
+fit_multi <- coxph(
+  Surv(dat[[time_col]], dat[[status_col]]) ~ risk_score + dat[[age_col]],
+  data = dat
+)
+summary(fit_multi)
+```
+
+##  Kaplan-Meier  plot--median
+```{r}
+##  Kaplan-Meier  plot
+med <- median(dat$risk_score, na.rm = TRUE)
+dat$risk_group <- ifelse(dat$risk_score >= med, "High risk", "Low risk")
+dat$risk_group <- factor(dat$risk_group, levels = c("Low risk", "High risk"))
+#  Fit KM
+fit_km <- survfit(
+    Surv(dat[[time_col]], dat[[status_col]]) ~ risk_group,
+    data = dat
+)
+
+# Cox HR for annotation
+fit_cox <- coxph(
+    Surv(dat[[time_col]], dat[[status_col]]) ~ risk_group,
+    data = dat
+)
+s <- summary(fit_cox)
+s 
+
+idx <- grep("risk_group", rownames(s$coefficients))   # 1
+hr_txt <- sprintf("HR = %.2f (%.2f–%.2f),  P = %.3f",
+                  s$conf.int[1],
+                  s$conf.int[1,"lower .95"],
+                  s$conf.int[1,"upper .95"],
+                  s$coefficients[1,"Pr(>|z|)"])
+
+
+# km plot # fig 5b
+p_km <- ggsurvplot(
+    fit_km,
+    data       = dat,
+    pval       = FALSE,         
+    risk.table = TRUE,
+    risk.table.col = "strata",  
+    conf.int = F,
+    palette = c("#314295", "#E64A63"),             
+   # legend = "none",            
+    # ncensor.plot        = TRUE,          
+    # ncensor.plot.col    = "strata",      
+    # ncensor.plot.height = 0.2,          
+    risk.table.height = 0.2,
+    xlab = "Time in months",
+    tables.y.text.col = T,
+    tables.y.text = F,
+    tables.height = 0.3,
+    tables.theme = theme_cleantable(),
+    censor.shape = 3,
+    censor.size = 1.5,
+
+    ggtheme = theme_bw() +
+        theme(
+            panel.grid = element_blank(),   
+            panel.border = element_blank(),
+            axis.line = element_line(color="black"),
+            text = element_text(size = 11)
+        )+
+        theme(
+            text = element_text(size = 11)  
+        )
+)
+
+p_km$plot <- p_km$plot +
+    annotate("text",
+             x = max(dat[[time_col]]) * 0.30,
+             y = 0.10,
+             label = hr_txt,
+             #size = 4.8
+             )
+
+p_km
+
+pdf("../Output/Survival/p_km.pdf", width = 6, height = 4.5)
+p_km
+dev.off()
+```
+
+
+
+# Fig5c
+```{r}
+library(timeROC)
+# 1: age + ER + race 
+fit_m1 <- coxph(Surv(dat[[time_col]], dat[[status_col]]) ~ age_group + ER + race, data = dat)
+dat$score_m1 <- predict(fit_m1, type="lp")
+td_m1 <- timeROC(T=dat[[time_col]], delta=dat[[status_col]], marker=dat$score_m1,
+                 cause=1, times=c(12,36), iid=TRUE)
+
+
+# 2: risk score only
+td_m2 <- timeROC(T=dat[[time_col]], delta=dat[[status_col]],
+                 marker=dat$risk_score,
+                 cause=1, times=c(12,36), iid=TRUE)
+
+
+#  3: risk score +  age + ER + race 
+fit_m3 <- coxph(Surv(dat[[time_col]], dat[[status_col]]) ~ risk_score + age_group + ER + race, data=dat)
+dat$score_m3 <- predict(fit_m3, type="lp")
+td_m3 <- timeROC(T=dat[[time_col]], delta=dat[[status_col]], marker=dat$score_m3,
+                 cause=1, times=c(12,36), iid=TRUE)
+
+df_roc <- bind_rows(
+  data.frame(FP = td_m1$FP[,2], TP = td_m1$TP[,2], Model="Age+ER+Race"),
+  data.frame(FP = td_m2$FP[,2], TP = td_m2$TP[,2], Model="Risk score"),
+  data.frame(FP = td_m3$FP[,2], TP = td_m3$TP[,2], Model="Combined model")
+)
+df_roc$Model <- factor(df_roc$Model,
+                       levels = c("Age+ER+Race", "Risk score", "Combined model"))
+AUC1 <- td_m1$AUC[2]
+AUC2 <- td_m2$AUC[2]
+AUC3 <- td_m3$AUC[2]
+
+## CI band function
+boot_roc <- function(data, marker, B=300){
+  fp_grid <- seq(0,1,length.out=100)   # 
+  tp_boot <- matrix(NA,100,B)
+
+  for(i in 1:B){
+    idx <- sample(1:nrow(data), replace=TRUE)
+    d2  <- data[idx,]
+
+    td <- try(timeROC(T=d2[[time_col]], delta=d2[[status_col]],
+                      marker=d2[[marker]], cause=1, times=36),silent=T)
+    if(class(td)=="try-error") next
+    tp_boot[,i] <- approx(td$FP[,2], td$TP[,2], xout = fp_grid, rule=2)$y
+  }
+
+  tibble(
+    FP      = fp_grid,
+    TP_mean = rowMeans(tp_boot, na.rm=T),
+    TP_low  = apply(tp_boot,1,quantile,0.025,na.rm=T),
+    TP_high = apply(tp_boot,1,quantile,0.975,na.rm=T)
+  )
+}
+
+ci_m1 <- boot_roc(dat,"score_m1")
+ci_m2 <- boot_roc(dat,"risk_score")
+ci_m3 <- boot_roc(dat,"score_m3")
+
+ci_m1$Model="Age+ER+Race"
+ci_m2$Model="Risk score"
+ci_m3$Model="Combined model"
+
+df_ci <- bind_rows(ci_m1,ci_m2,ci_m3)
+df_ci$Model <- factor(df_ci$Model,
+                      levels=c("Age+ER+Race","Risk score","Combined model"))
+
+df_ci$Model <- factor(df_ci$Model,
+                      levels=c("Age+ER+Race","Risk score","Combined model"))
+df_roc$Model <- factor(df_roc$Model,
+                      levels=c("Age+ER+Race","Risk score","Combined model"))
+
+#plot
+cols = c("Age+ER+Race"="#314295",  
+         "Risk score"      ="#E64A63",  
+         "Combined model"        ="#2A9D8F")  
+legend_labels <- c(
+  "Age+ER+Race"   = sprintf("Age+ER+Race (AUC = %.2f)", AUC1),
+  "Risk score"    = sprintf("Risk score (AUC = %.2f)",   AUC2),
+  "Combined model"= sprintf("Combined model (AUC = %.2f)", AUC3)
+)
+
+
+p_roc <- ggplot(df_roc, aes(x = FP, y = TP, color = Model)) +
+  geom_line(linewidth = 1.1, alpha = 0.95) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", color = "grey60") +
+  coord_equal(xlim = c(-0.01, 1.01), ylim = c(-0.01, 1.01), expand = FALSE) +
+  scale_color_manual(values = cols,
+                     labels = legend_labels) +
+  labs(
+    x = "1 - Specificity",
+    y = "Sensitivity",
+    color = NULL
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid       = element_blank(),
+    text             = element_text(color = "black"),
+    axis.text        = element_text(color = "black"),
+    legend.position  = c(0.6, 0.15),
+    legend.background = element_rect(fill = scales::alpha("white", 0.8), color = NA),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width  = unit(0.5, "cm"),
+    legend.text       = element_text(size = 10)
+  )+
+    geom_ribbon(data=df_ci,
+              aes(x=FP,ymin=TP_low,ymax=TP_high,fill=Model),
+              alpha=0.10,inherit.aes=FALSE)+
+  scale_fill_manual(values=cols,guide="none")
+
+
+p_roc
+ggsave("../Output/Survival/ROC_36m.pdf",p_roc,width=4.5,height=4)
+```
+
+
+# Fig5 a
+```{r}
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+
+## 1Extract Cox model results: coef, HR, CI, p-value
+# final_model is the fitted Cox model using the stable taxa.
+s <- summary(final_model)
+
+# Clean table of coefficients and hazard ratios
+coef_tab <- data.frame(
+  taxon   = gsub("`", "", rownames(s$coefficients)),  
+  coef    = s$coefficients[, "coef"],
+  se      = s$coefficients[, "se(coef)"],
+  z       = s$coefficients[, "z"],
+  p       = s$coefficients[, "Pr(>|z|)"],
+  HR      = s$conf.int[, "exp(coef)"],
+  HR_low  = s$conf.int[, "lower .95"],
+  HR_up   = s$conf.int[, "upper .95"],
+  row.names = NULL,
+  check.names = FALSE
+)
+
+## Merge repeated CV selection frequency results
+# freq_df: taxon, freq (0–1)
+# n_repeats: number of repeated CV runs 
+res_df <- freq_df %>%
+  filter(taxon %in% stable_features) %>%          # keep only stable taxa
+  mutate(n_selected = freq * n_repeats) %>%       # convert frequency → absolute count
+  left_join(coef_tab, by = "taxon") %>%           # merge Cox model results
+  mutate(
+    risk_dir = ifelse(coef > 0, "High risk", "Low risk")   # direction of risk
+  )
+
+## Extract clean species names
+# Use only the last element of the taxonomic path (species level)
+res_df <- res_df %>%
+  mutate(
+    species_raw = sapply(strsplit(taxon, ";"), function(x) tail(x, 1)),
+    species     = gsub("_", " ", species_raw)  # prettier labels
+  ) %>%
+  arrange(desc(coef)) %>%                        # order taxa by coefficient
+  mutate(species = factor(species, levels = rev(unique(species))))
+
+
+# theme 
+base_size_common <- 14
+
+# Left panel
+p_freq <- ggplot(res_df,
+                 aes(x = n_selected, y = species)) +
+  geom_point(size = 3) +
+  xlab("Number of times selected") +
+  ylab(NULL) +
+  theme_bw(base_size = base_size_common) +
+  theme(
+    axis.text.y = element_text(face = "italic", color = "black"),  
+    axis.text.x = element_text(color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(color = "grey85")
+  )
+p_freq
+## middle panel
+p_hr <- ggplot(res_df,
+               aes(x = HR, y = species)) +
+  geom_vline(xintercept = 1, linetype = "dashed") +       
+  geom_errorbarh(aes(xmin = HR_low, xmax = HR_up), height = 0) +
+  geom_point(size = 3) +
+  scale_x_log10() +                                       
+  xlab("Hazard Ratio (95% CI)") +
+  ylab(NULL) +
+  theme_bw(base_size = base_size_common) +
+  theme(
+    axis.text.y = element_blank(),       
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(color = "grey85")
+  )
+p_hr
+## right panel
+cols <- c("High risk" = "#E64A63", "Low risk" = "#314295")
+
+p_coef <- ggplot(res_df,
+                 aes(x = coef, y = species, fill = risk_dir)) +
+  geom_col(color = "black", width = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_fill_manual(values = cols) +
+  labs(
+    x = "Coefficient",
+    y = "",
+    fill = ""
+  ) +
+  theme_bw(base_size = base_size_common) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x = element_text(color = "black"),
+    axis.line = element_line(color = "black", linewidth = 0.6),
+    axis.text.y = element_blank(),         
+    axis.ticks.y = element_blank(),
+    legend.position = c(0.95, 0.05),       
+    legend.justification = c(1, 0),
+    legend.background = element_rect(fill = scales::alpha("white", 0.8), color = NA)
+  )
+
+
+## merge
+p_all <- plot_grid(
+  p_freq, p_hr, p_coef,
+  nrow = 1,
+  rel_widths = c(1.2, 0.6, 1),   
+  align = "h",                     
+  axis  = "tb"                     
+)
+
+p_all
+
+ggsave("../Output/Survival/Fig2_species.pdf",
+       p_all, width = 10, height = 3)
+
+```
+
+#Fig5d
+```{r}
+# SHAP
+library(kernelshap)
+library(shapviz)
+library(ggplot2)
+library(dplyr)
+library(pheatmap)
+
+##  Prepare the taxa list + coefficients from final_model
+# Ensure stable_features matches actual column names in dat
+stable_features <- intersect(stable_features, colnames(dat))
+
+# Extract Cox model coefficients and clean their names
+sel_coefs <- coef(final_model)
+names(sel_coefs) <- gsub("`", "", names(sel_coefs))   
+
+# Keep only coefficients corresponding to stable features
+sel_coefs <- sel_coefs[names(sel_coefs) %in% stable_features]
+
+# Build species-level signature table
+signature_df <- data.frame(
+  taxon = stable_features,
+  coef  = sel_coefs[stable_features],   # correctly aligned after the fix
+  row.names = NULL
+)
+
+# Extract species names (last taxonomic level)
+signature_df$species_raw   <- sapply(strsplit(signature_df$taxon, ";"), tail, 1)
+signature_df$species_clean <- gsub("_", " ", signature_df$species_raw)
+
+# Map full taxonomy → clean species name
+taxon_to_species <- setNames(signature_df$species_clean, signature_df$taxon)
+
+
+
+##  Prepare X_shap using stable_features only
+# Extract CLR abundance matrix for the selected stable taxa
+X_shap <- as.data.frame(dat[, stable_features, drop = FALSE])
+# Rename columns to clean species names 
+colnames(X_shap) <- taxon_to_species[colnames(X_shap)]
+
+## Enforce SAME species order as Fig5d 
+species_order <- as.character(res_df$species)
+species_order <- levels(res_df$species)   # revse order
+# Keep only species that exist in X_shap (safety check)
+species_order <- species_order[species_order %in% colnames(X_shap)]
+
+# Reorder columns of X_shap to match coef-sorted order
+X_shap <- X_shap[, species_order, drop = FALSE]
+
+## Background data for KernelSHAP (20 samples)
+set.seed(123)
+bg <- X_shap[sample(1:nrow(X_shap), 20), , drop = FALSE]
+
+
+##  Fit SHAP model 
+fit_shap <- lm(risk_score ~ ., data = cbind(risk_score = dat$risk_score, X_shap))
+
+## KernelSHAP + shapviz
+sh <- kernelshap(
+  object = fit_shap,
+  X      = X_shap,
+  bg_X   = bg
+)
+
+sv <- shapviz(sh, X = X_shap)
+
+## SHAP plot
+base_size_common <- 14
+cols_risk <- c("#314295", "#E64A63")
+
+p_shap <- sv_importance(
+  sv,
+  max_display  = length(species_order),
+  kind         = "beeswarm",
+  viridis_args = list(option = "inferno"),
+  
+  sort         = FALSE
+) +
+  scale_y_discrete(limits = species_order) +
+  labs(
+    x = "SHAP value",
+    y = NULL,
+    color = "Relative Abundance"
+  ) +
+  theme_classic(base_size = base_size_common) +
+  theme(
+    axis.text  = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+    axis.line    = element_line(color = "black", linewidth = 0.8)
+  )
+p_shap
+
+ggsave("../Output/Survival/SHAP_beeswarm_coefsame.pdf",
+       p_shap, width = 7, height = 5)
+
+
+##  Heatmap --abundance
+sig_abundance <- dat[, stable_features]
+rownames(sig_abundance) <- dat$sampleID
+colnames(sig_abundance) <- taxon_to_species[colnames(sig_abundance)]
+sig_abundance <- sig_abundance[, species_order]
+
+order_idx <- order(dat$risk_group, decreasing = TRUE)
+sig_abundance <- sig_abundance[order_idx, ]
+
+ann <- data.frame(RiskGroup = dat$risk_group[order_idx])
+rownames(ann) <- rownames(sig_abundance)
+
+heat_mat <- t(sig_abundance)
+heat_mat <- heat_mat[species_order, ]
+
+cols_group <- c("High risk" = "#E64A63", "Low risk" = "#314295")
+
+pdf("../Output/Survival/p_heatmap_signature.pdf", width = 7, height = 2.5)
+pheatmap(
+  heat_mat,
+  scale = "row",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_col = ann,
+  annotation_colors = list(RiskGroup = cols_group),
+  show_colnames = FALSE,
+  fontsize_row = 10,
+  color = colorRampPalette(c("#3F1B77", "#FFFFFF", "#D4A017"))(100)
+)
+dev.off()
+
+
+```
+
+
+

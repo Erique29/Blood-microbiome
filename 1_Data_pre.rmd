@@ -1,0 +1,565 @@
+---
+title: "SKCCC_blood_project"
+author: "XYM"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#packages
+```{r}
+library(readxl)
+library(dplyr)
+library(openxlsx)
+library(readr)
+library(purrr)
+library(stringr)
+library(digest)
+library(phyloseq)
+library(microbiome)
+library(ggplot2)
+library(forcats)
+library(vegan)
+library(maaslin3)
+library(here)
+library(rstatix) 
+library(ggpubr)
+```
+
+setwd('~/Library/CloudStorage/Box-Box/Wang Group_TW TC YX/SKCCC_data/xym_results')
+
+# prepare data
+```{r}
+# replace sample name
+abund <- read_excel(here('../Input/MAP2B_results/map2b_result_g5_10162025/Abundance.xlsx'))
+name <- read_excel(here('../Input/MAP2B_results/Corresponding_table_of_sequencing_samples.xlsx'))
+
+name <- name %>%
+  mutate(
+    R1_short = str_remove(R1, ".R1.fastq.gz"),
+    R2_short = str_remove(R2, ".R2.fastq.gz")
+  )
+
+mapping <- name %>%
+  select(R1_short, location1) %>%
+  rename(sample_old = R1_short, sample_new = location1) %>%
+  filter(!is.na(sample_new))
+
+old_names <- colnames(abund)
+new_names <- old_names
+for (i in seq_along(old_names)) {
+  matched <- mapping$sample_new[match(old_names[i], mapping$sample_old)]
+  if (!is.na(matched)) {
+    new_names[i] <- matched
+  }
+}
+colnames(abund) <- new_names
+
+write.csv(abund, "../Output/abundance_table_renamed.csv", row.names = FALSE)
+```
+
+# get phyloseq
+```{r}
+# get phyloseq
+#abund
+abund <- read.csv('../Output/abundance_table_renamed.csv', check.names = FALSE)
+colnames(abund)[1] <- "Kingdom"
+#meta
+meta_data <- read_csv("../Input/metadata.csv") %>% as.data.frame()
+rownames(meta_data) <- meta_data$Sample_id
+
+#reorder samples
+sample_cols <- colnames(abund)[8:ncol(abund)]
+common_samples <- intersect(sample_cols, rownames(meta_data))
+common_samples <- rownames(meta_data)[rownames(meta_data) %in% common_samples]
+abund_ordered <- abund %>%
+  dplyr::select(all_of(c(colnames(abund)[1:7], common_samples)))
+
+identical(colnames(abund_ordered)[8:ncol(abund_ordered)], rownames(meta_data))
+write.csv(abund_ordered, '../Output/abund.reorder.csv')
+
+#taxo
+tax_cols <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+tax_table_df <- abund_ordered[, tax_cols]
+otu_abund_df <- abund_ordered[, !(colnames(abund_ordered) %in% tax_cols)]
+#row name
+rownames(tax_table_df) <- apply(tax_table_df, 1, function(x) paste(x, collapse = ";"))
+rownames(otu_abund_df) <- rownames(tax_table_df)
+
+# merge in phyloseq
+otu <- otu_table(as.matrix(otu_abund_df), taxa_are_rows = TRUE)
+tax <- tax_table(as.matrix(tax_table_df))
+smp <- sample_data(meta_data)
+ps <- phyloseq(otu, tax, smp)
+
+#info
+ps
+
+otu_ids <- colnames(otu_table(ps))
+meta_ids <- rownames(sample_data(ps))
+
+setdiff(otu_ids, meta_ids)
+setdiff(meta_ids, otu_ids)
+identical(otu_ids, meta_ids)
+
+saveRDS(ps, '../Output/physeq_raw.RDS')
+#
+#abund_final <- abund %>% select(-D312, -D1304, -D1423, -D1439, -D1068, 
+#                                        -IC2, -IC3, -IC4, -IC5, -IC6) #D1068--asian
+#remain 38 samples
+
+```
+
+# decontaminant
+```{r}
+#remove contaminants using decontam
+library(decontam)
+ps <- readRDS('../Output/physeq_raw.RDS')
+
+#remove some samples
+ps <- prune_samples(!(sample_names(ps) %in% 
+                            c("D312", "D1304", "D1423", "D1439", "D1068")), 
+                          ps)
+ps
+colnames(sample_data(ps))
+table(sample_data(ps)$race)
+
+head(sample_data(ps))
+
+#Inspect Library Sizes
+df <- as.data.frame(sample_data(ps)) 
+df$LibrarySize <- sample_sums(ps)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=Sample_or_Control)) + geom_point()
+
+#Identify Contaminants - Prevalence
+sample_data(ps)$is.neg <- sample_data(ps)$Sample_or_Control == "Control Sample"
+contamdf.prev <- isContaminant(ps, method="prevalence", neg="is.neg", threshold=0.1)
+table(contamdf.prev$contaminant)   # 59 contams
+head(which(contamdf.prev$contaminant))
+sum(contamdf.prev$contaminant) / nrow(contamdf.prev) #p=0.1 2.9%, 0.5: 6.6%
+
+ps.pa <- transform_sample_counts(ps, function(abund) 1*(abund>0))
+ps.pa.neg <- prune_samples(sample_data(ps.pa)$Sample_or_Control == "Control Sample", ps.pa)
+ps.pa.pos <- prune_samples(sample_data(ps.pa)$Sample_or_Control == "True Sample", ps.pa)
+# Make data.frame of prevalence in positive and negative samples
+df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+                      contaminant=contamdf.prev$contaminant)
+ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+
+#reconstruct ps
+# get names
+contam_taxa <- rownames(contamdf.prev)[contamdf.prev$contaminant == TRUE]
+
+# clean ps
+ps_clean <- prune_taxa(!(taxa_names(ps) %in% contam_taxa), ps)
+
+ps_clean
+saveRDS(ps_clean, "../Output/phyloseq_cleaned.rds")
+# get percent
+paste0(round(sum(contamdf.prev$contaminant) / nrow(contamdf.prev) * 100, 2), "% OTUs removed")
+
+# plot
+barplot(c(Before = ntaxa(ps), After = ntaxa(ps_clean)),
+        col = c("tomato", "seagreen"),
+        main = "Number of taxa before and after decontam",
+        ylab = "Taxa count")
+
+```
+
+#batch correction
+```{r}
+## Batch effect correction using MMUPHin package 
+library(MMUPHin)
+ps_clean <- readRDS("../Output/phyloseq_cleaned.rds")
+
+#remove ctrl
+table(sample_data(ps_clean)$Sample_or_Control)
+
+ps_no_neg <- subset_samples(ps_clean, Sample_or_Control != "Control Sample")
+
+# normalization
+sample_sums(ps_no_neg) %>% summary()
+
+ps_no_neg <- ps_no_neg %>%
+  transform_sample_counts(function(x) {x / sum(x)})
+
+sample_sums(ps_no_neg) %>% summary()
+
+
+#remove all 0 species
+ps_no_neg <- prune_taxa(taxa_sums(ps_no_neg) > 0, ps_no_neg)
+ps_no_neg
+
+#prepare table
+feature_abd <- as.data.frame(otu_table(ps_no_neg))
+meta_data <- as.data.frame(sample_data(ps_no_neg))
+
+stopifnot(identical(meta_data$Sample_id, colnames(feature_abd)))
+identical(colnames(feature_abd), rownames(meta_data))
+
+# get sample_data
+meta_data <- data.frame(sample_data(ps_no_neg), stringsAsFactors = FALSE)
+
+# match row names
+meta_data <- meta_data[colnames(feature_abd), , drop = FALSE]
+
+# trans to factors
+meta_data$batch <- as.factor(meta_data$batch)
+
+str(meta_data)
+
+species_adj <- adjust_batch(
+  feature_abd = feature_abd,
+  batch = "batch",            # batch
+  covariates = NULL,         
+  data = meta_data,
+  control = list(verbose = TRUE)
+)
+
+
+# -----------------------------
+# get adj abund df
+# -----------------------------
+feature_abd_adj <- species_adj$feature_abd_adj
+write.csv(feature_abd_adj, "../Output/abundance_batch_corrected.csv")
+
+# -----------------------------
+# plot
+# -----------------------------
+# -before
+ord1 <- cmdscale(vegdist(t(feature_abd), method = "bray"), k = 2)
+df1 <- data.frame(ord1, batch = as.factor(meta_data$batch))
+colnames(df1)[1:2] <- c("PCoA1", "PCoA2")
+
+p1 <- ggplot(df1, aes(PCoA1, PCoA2, color = batch)) +
+  geom_point(size = 3, alpha = 0.8) +
+  ggtitle("Before batch correction") +
+  theme_bw()
+p1
+# -after
+ord2 <- cmdscale(vegdist(t(feature_abd_adj), method = "bray"), k = 2)
+df2 <- data.frame(ord2, batch = as.factor(meta_data$batch))
+colnames(df2)[1:2] <- c("PCoA1", "PCoA2")
+
+p2 <- ggplot(df2, aes(PCoA1, PCoA2, color = batch)) +
+  geom_point(size = 3, alpha = 0.8) +
+  ggtitle("After batch correction") +
+  theme_bw()
+
+# merge
+library(patchwork)
+ggsave('batch.pdf', p1 + p2, height = 4, width = 7)
+```
+
+# re-constrict ps
+```{r}
+#reconstrcut ps
+dim(feature_abd_adj)
+head(colnames(feature_abd_adj))
+head(sample_names(ps_no_neg))
+#!!
+otu_table(ps_no_neg) <- otu_table(as.matrix(feature_abd_adj), taxa_are_rows = TRUE)
+
+taxa_are_rows(ps_no_neg)
+
+ps_corrected <- ps_no_neg
+#check
+nsamples(ps_corrected)
+ncol(feature_abd_adj)
+ord_after <- ordinate(ps_corrected, method = "PCoA", distance = "bray")
+plot_ordination(ps_corrected, ord_after, color = "batch") +
+  ggtitle("After Batch Correction")
+
+#remove all 0 species
+ps_no_neg <- prune_taxa(taxa_sums(ps_no_neg) > 0, ps_no_neg)
+ps_no_neg
+# phyloseq-class experiment-level object
+# otu_table()   OTU Table:         [ 1671 taxa and 38 samples ]
+# sample_data() Sample Data:       [ 38 samples by 28 sample variables ]
+# tax_table()   Taxonomy Table:    [ 1671 taxa by 7 taxonomic ranks ]
+
+saveRDS(ps_corrected, "../Output/phyloseq.rds")
+
+```
+
+
+# revise tnbc data in meta
+```{r}
+physeq <- readRDS('../Output/phyloseq_wrong_TNBC.rds')
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+
+meta <- meta %>%
+  mutate(
+    TNBC = case_when(
+      ER == "N" & PR == "N" & HER2 == "N" ~ "Y", 
+      ER == "Y" | PR == "Y" | HER2 == "Y" ~ "N",  
+      TRUE ~ NA_character_ 
+    )
+  )
+
+sample_data(physeq) <- sample_data(meta)
+
+#resave
+saveRDS(physeq, "../Output/physeq.rds")
+```
+
+# update meta bable with ctc, bmi, smoking....etc
+```{r}
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+
+# meta <- meta %>%
+#   mutate(age_group = ifelse(age_MBC_dx < 50, "<50", "≥50"))
+
+#change SAMPLE NAMES
+# add new name of the samples, such as p1- p38
+meta <- meta %>%
+  mutate(.old_id = rownames(.)) %>%
+  arrange(Order) %>%
+  mutate(plot_name = paste0("P", seq_len(n())))
+
+physeq <- prune_samples(meta$.old_id, physeq)
+
+meta2 <- meta
+rownames(meta2) <- meta2$.old_id
+sample_data(physeq) <- sample_data(meta2)
+
+map <- meta$plot_name
+names(map) <- meta$.old_id
+sample_names(physeq) <- map[sample_names(physeq)]
+
+meta3 <- data.frame(sample_data(physeq), check.names = FALSE)
+rownames(meta3) <- sample_names(physeq)
+sample_data(physeq) <- sample_data(meta3)
+
+#### write abund csv   -----> get table s1
+
+otu <- as.data.frame(otu_table(physeq))
+if (!taxa_are_rows(physeq)) otu <- t(otu)
+otu <- as.data.frame(otu)
+otu$FeatureID <- rownames(otu)   # ASV/OTU ID
+
+
+tax <- as.data.frame(tax_table(physeq))
+tax$FeatureID <- rownames(tax)
+
+
+abund_with_tax <- tax %>%
+  left_join(otu, by = "FeatureID") %>%
+  relocate(FeatureID)
+
+write.csv(abund_with_tax, "./../Output/abundance_with_taxonomy.csv", row.names = FALSE)
+
+#add data in excel
+#write.csv(meta, '../Output/meta_modify.csv')
+meta_new <- read.csv('../Output/meta_modify.csv')
+rownames(meta_new) <- meta_new$Sample_id
+# add BMI group info
+meta_new <- meta_new %>%
+  mutate(
+    BMI_cat = case_when(
+      BMI < 18.5 ~ "Underweight",
+      BMI >= 18.5 & BMI < 25 ~ "Normal",
+      BMI >= 25 & BMI < 30 ~ "Overweight",
+      BMI >= 30 ~ "Obesity",
+      TRUE ~ NA_character_
+    )
+  )
+sample_data(physeq) <- meta_new
+
+#check
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+#save rds
+saveRDS(physeq, '../Output/physeq.rds')
+
+
+#  get phylum and genus info
+
+tax <- as.data.frame(tax_table(physeq))
+length(unique(tax$Phylum[!is.na(tax$Phylum) & tax$Phylum != ""]))   # 29 phylum
+length(unique(tax$Genus[!is.na(tax$Genus) & tax$Genus != ""]))   # 609 genus
+```
+
+
+###############################################################
+##Statistical Information (including control)
+```{r}
+
+#get abund of crtl
+ps_clean <- readRDS("../Output/phyloseq_cleaned.rds")
+
+ps_ctrl <- subset_samples(ps_clean, Sample_or_Control == "Control Sample")
+
+abd_ctrl <- as.data.frame(otu_table(ps_ctrl))
+
+# rela
+abd_ctrl <- apply(abd_ctrl, 2, function(x) x / sum(x))
+
+#  taxa of crtl
+ctrl_detected <- rownames(abd_ctrl)[rowSums(abd_ctrl > 0) > 0]
+
+length(ctrl_detected)
+
+
+
+
+#get abund of physeq
+physeq <- readRDS("../Output/phyloseq.rds")
+
+abd_final <- as.data.frame(otu_table(physeq))
+
+# get prev such as 20% and 30%
+n_samples <- ncol(abd_final)
+
+prev_final <- rowSums(abd_final > 0) / n_samples
+
+core10 <- names(prev_final[prev_final >= 0.10])
+core20 <- names(prev_final[prev_final >= 0.20])
+core30 <- names(prev_final[prev_final >= 0.30])
+core50 <- names(prev_final[prev_final >= 0.50])
+
+length(core10)  #276
+length(core20)  #123
+length(core30)  #61
+length(core50)  #26
+
+##overlap sps
+overlap10 <- intersect(core10, ctrl_detected)
+overlap20 <- intersect(core20, ctrl_detected)
+overlap30 <- intersect(core30, ctrl_detected)
+overlap50 <- intersect(core50, ctrl_detected)
+
+length(overlap10)  #46
+length(overlap20)  #27
+length(overlap30)  #15
+length(overlap50)  #9
+
+# overlap proportion 
+length(overlap10) / length(core10) #16.67%
+length(overlap20) / length(core20) #21.95%
+length(overlap30) / length(core30) #24.59%
+length(overlap50) / length(core50) #34.62%
+
+# get abund of core tax
+
+get_core_summary <- function(abd_matrix, core_taxa){
+
+  core_abd <- abd_matrix[core_taxa, , drop = FALSE]
+
+  data.frame(
+    Sample = colnames(abd_matrix),
+
+    core_mean   = colMeans(core_abd),
+    core_median = apply(core_abd, 2, median),
+
+    core_sum    = colSums(core_abd),
+
+    core_richness = colSums(core_abd > 0)
+  )
+}
+summary10 <- get_core_summary(abd_final, core10)
+summary20 <- get_core_summary(abd_final, core20)
+summary30 <- get_core_summary(abd_final, core30)
+summary50 <- get_core_summary(abd_final, core50)
+
+
+
+#########export table S1
+library(dplyr)
+library(tibble)
+# taxonomy table from physeq (taxa x ranks)
+tax_df <- as.data.frame(tax_table(physeq)) %>%
+  rownames_to_column("FeatureID")
+
+# prevalence in true samples (physeq has 38 samples)
+prev_df <- data.frame(
+  FeatureID = names(prev_final),
+  Prevalence = as.numeric(prev_final),
+  Prevalence_N = as.integer(rowSums(abd_final > 0)),
+  stringsAsFactors = FALSE
+)
+
+# abundance summaries in true samples
+abd_stats <- data.frame(
+  FeatureID = rownames(abd_final),
+  Mean_Abundance = rowMeans(abd_final),
+  Median_Abundance = apply(abd_final, 1, median),
+  Max_Abundance = apply(abd_final, 1, max),
+  stringsAsFactors = FALSE
+)
+
+# control overlap flag (presence/absence in negative controls)
+ctrl_flag <- data.frame(
+  FeatureID = rownames(abd_final),
+  Overlap_with_Control = rownames(abd_final) %in% ctrl_detected,
+  stringsAsFactors = FALSE
+)
+
+# (optional) control prevalence (how many control samples detected it)
+ctrl_prev_df <- data.frame(
+  FeatureID = rownames(abd_ctrl),
+  Control_Prevalence_N = as.integer(rowSums(abd_ctrl > 0)),
+  Control_Prevalence = as.numeric(rowSums(abd_ctrl > 0) / ncol(abd_ctrl)),
+  stringsAsFactors = FALSE
+)
+
+# master table (one row per species)
+master_tbl <- tax_df %>%
+  left_join(prev_df, by = "FeatureID") %>%
+  left_join(abd_stats, by = "FeatureID") %>%
+  left_join(ctrl_flag, by = "FeatureID") %>%
+  left_join(ctrl_prev_df, by = "FeatureID") %>%
+  mutate(
+    Control_Prevalence_N = ifelse(is.na(Control_Prevalence_N), 0L, Control_Prevalence_N),
+    Control_Prevalence   = ifelse(is.na(Control_Prevalence), 0, Control_Prevalence),
+    Prev_Label = paste0(Prevalence_N, "/", n_samples)
+  )
+
+# ---- Table S1: core20
+TableS1_core20 <- master_tbl %>%
+  filter(FeatureID %in% core20) %>%
+  mutate(Core_Threshold = ">=20%") %>%
+  arrange(desc(Overlap_with_Control), desc(Prevalence), desc(Mean_Abundance))
+
+# ---- Table S1: core50
+TableS1_core50 <- master_tbl %>%
+  filter(FeatureID %in% core50) %>%
+  mutate(Core_Threshold = ">=50%") %>%
+  arrange(desc(Overlap_with_Control), desc(Prevalence), desc(Mean_Abundance))
+
+# add abund of all samples
+abd_wide <- abd_final %>%
+  as.data.frame() %>%
+  rownames_to_column("FeatureID")
+master_tbl2 <- master_tbl %>%
+  left_join(abd_wide, by = "FeatureID")
+
+TableS1_core20 <- master_tbl2 %>%
+  filter(FeatureID %in% core20) %>%
+  mutate(Core_Threshold = ">=20%") %>%
+  arrange(desc(Overlap_with_Control), desc(Prevalence), desc(Mean_Abundance))
+
+TableS1_core50 <- master_tbl2 %>%
+  filter(FeatureID %in% core50) %>%
+  mutate(Core_Threshold = ">=50%") %>%
+  arrange(desc(Overlap_with_Control), desc(Prevalence), desc(Mean_Abundance))
+
+
+# export csv
+write.csv(TableS1_core20, "../Output/TableS1_core20_with_control_overlap.csv", row.names = FALSE)
+write.csv(TableS1_core50, "../Output/TableS1_core50_with_control_overlap.csv", row.names = FALSE)
+
+# quick sanity checks (should be 27 and 9)
+sum(TableS1_core20$Overlap_with_Control)  # expect 27
+sum(TableS1_core50$Overlap_with_Control)  # expect 9
+
+
+```
+
+
+

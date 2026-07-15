@@ -1,0 +1,857 @@
+---
+title: "Maaslin"
+author: "XYM"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#continue
+```{r}
+#continue
+physeq <- readRDS('../Output/physeq.rds')
+# otu_table()   OTU Table:         [ 1671 taxa and 38 samples ]
+# sample_data() Sample Data:       [ 38 samples by 28 sample variables ]
+# tax_table()   Taxonomy Table:    [ 1671 taxa by 7 taxonomic ranks ]
+```
+
+#Fig 5
+# maslin -- 4 factors - prev 0.3  age, race, ER, CTC
+```{r}
+#=========================================================
+# maaslin3 in species level  --age + ER + race + ctc
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+
+meta <- meta %>%
+  mutate(
+    ctc2 = case_when(
+      CTC_count_cat %in% c("0","0-5") ~ "0–5",
+      CTC_count_cat == ">5" ~ ">5",
+      TRUE ~ NA_character_
+    )
+  )
+
+meta_ctc <- meta %>% filter(!is.na(ctc2))
+
+physeq_ctc <- prune_samples(rownames(meta_ctc), physeq)
+#set refer
+meta_ctc$ctc2 <- factor(meta_ctc$ctc2)
+meta_ctc$ctc2 <- relevel(meta_ctc$ctc2, ref = "0–5")
+
+# maaslin function
+library(maaslin3)
+run_single_factor <- function(physeq_obj, metadata_df, factor_name, out_dir) {
+  
+  # input files
+  abund <- as.data.frame(t(phyloseq::otu_table(physeq_obj)))
+  meta  <- metadata_df[, factor_name, drop = FALSE]
+
+  #  Maaslin3 
+  maaslin3(
+    input_data    = abund,
+    input_metadata = meta,
+    output        = out_dir,
+    formula       = paste0("~ ", factor_name),
+    min_prevalence = 0.5, #prevalence
+    normalization = "TSS",
+    transform = "LOG",
+    augment = TRUE,
+    standardize = TRUE,
+    median_comparison_abundance = TRUE,
+    median_comparison_prevalence = FALSE,
+    max_significance = 0.25,
+    cores = 4
+    )
+  
+  cat("Finished:", factor_name, "\n")
+}
+
+# 1 age
+run_single_factor(
+  physeq_obj = physeq,
+  metadata_df = meta,
+  factor_name = "age_group",
+  out_dir = "../Output/Maaslin3/age_group_only_0.5/"
+)
+
+# 2 race
+run_single_factor(
+  physeq_obj = physeq,
+  metadata_df = meta,
+  factor_name = "race",
+  out_dir = "../Output/Maaslin3/race_only_0.5/"
+)
+
+# 3 ER
+run_single_factor(
+  physeq_obj = physeq,
+  metadata_df = meta,
+  factor_name = "ER",
+  out_dir = "../Output/Maaslin3/ER_only_0.5/"
+)
+
+# ctc
+run_single_factor(
+  physeq_obj = physeq_ctc,
+  metadata_df = meta_ctc,
+  factor_name = "ctc2",
+  out_dir = "../Output/Maaslin3/ctc2_only_0.5/"
+)
+
+
+
+# 
+# 
+# # ===== add anno =====
+# maaslin3_species_output <- read.table("../Output/maaslin3_age_group_race_sample_type_ER_output_species_0.25_filter_prev_0.3/all_results.tsv", header = TRUE, sep = "\t")
+# #maaslin3_species_output <- maaslin3_species_output[maaslin3_species_output$metadata == "age_group",]
+# tax_df <- as.data.frame(tax_table(physeq))
+# 
+# maaslin3_species_output$Species <- tax_df$Species[match(maaslin3_species_output$feature, rownames(tax_df))]
+# write.csv(maaslin3_species_output, "../Output/maaslin3_age_group_race_sample_type_ER_output_species_0.25_filter_prev_0.3/maaslin3_age_group_race_sample_type_ER_output_species_0.25_filter_prev_0.3_with_species.csv", row.names = FALSE)
+```
+
+# maaslin plot -- lollipop plot , refer to ROC paper ----age
+```{r}
+library(phyloseq)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(cowplot)
+library(stringr)
+library(colorspace)
+
+
+## meta data
+physeq <- readRDS("../Output/physeq.rds")
+
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+otu  <- as.data.frame(t(otu_table(physeq)))
+tax  <- as.data.frame(tax_table(physeq))
+
+
+##  Maaslin3 result for age_group
+file_age <- "../Output/Maaslin3/age_group_only_0.5/all_results.tsv"
+df <- read_tsv(file_age, show_col_types = FALSE)
+
+## Keep only abundance rows
+df <- df %>% filter(str_detect(model, "abundance"))
+
+## Extract species name (last element)
+df$Species <- sapply(strsplit(df$feature, ";"), tail, 1)
+df$Species <- gsub("_", " ", df$Species)
+
+## Extract phylum (second rank)
+df$Phylum <- sapply(strsplit(df$feature, ";"), function(x) x[2])
+
+## Order by coefficient 
+df <- df %>% arrange(coef)
+df$Species <- factor(df$Species, levels = df$Species)
+
+
+## Compute prevalence 
+taxa_keep <- df$feature
+otu_sub <- otu[, taxa_keep, drop = FALSE]
+
+calc_prev <- function(vec, grp) tapply(vec > 0, grp, mean) * 100
+prev_mat  <- sapply(otu_sub, calc_prev, grp = meta$age_group)
+prev_df   <- as.data.frame(t(prev_mat))
+
+prev_df$feature <- rownames(prev_df)
+colnames(prev_df)[1:2] <- c(">=50", "<50")
+
+df <- df %>% left_join(prev_df, by = "feature")
+
+## Format long version for right panel
+df_prev <- df %>%
+  select(Species, `<50`, `>=50`) %>%
+  pivot_longer(cols = c(`<50`, `>=50`),
+               names_to = "Group",
+               values_to = "Prevalence") %>%
+  mutate(
+    Species = factor(Species, levels = levels(df$Species)),
+    Group   = factor(Group, levels = c("<50", ">=50"))
+  )
+
+## colors 
+## left coef panel
+df$coef_dir <- ifelse(df$coef >= 0, "pos", "neg")
+df$coef_dir <- factor(df$coef_dir, levels = c("neg", "pos"))
+
+coef_cols <- c(
+  "neg" = "#D5A021",  
+  "pos" = "#6C4E09"   
+)
+
+## star marking on significant taxa
+df$signif <- df$qval_joint < 0.25
+
+## Phylum colors
+phylum_colors <- c(
+  "Proteobacteria"   = "#D7B348",  
+  "Firmicutes"       = "#308178",  
+  "Actinobacteriota" = "#D45740"   
+)
+## Prevalence colors
+prev_cols <- c(
+  "<50"  = "#D5A021",
+  ">=50" = "#6C4E09"
+)
+
+
+##  Left panel
+p_coef <- ggplot(df, aes(y = Species)) +
+  geom_segment(aes(
+    x = 0, xend = coef,
+    yend = Species,
+    color = coef_dir
+  ), linewidth = 1.0) +
+  geom_point(aes(x = coef, color = coef_dir),
+             size = 3) +
+  geom_text(
+    data = subset(df, signif),
+    aes(x = coef, y = Species, label = "*"),
+    nudge_x = 0.02 * diff(range(df$coef, na.rm = TRUE)), 
+    size = 3
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  scale_color_manual(values = coef_cols, guide = "none") +
+  labs(x = "Coefficient", y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid  = element_blank(),
+    axis.text.y = element_text(face = "italic", color = "black"),
+    axis.text.x = element_text(color = "black")
+  )
+
+
+##  Middle panel
+df_phylum <- df %>% dplyr::select(Species, Phylum)
+
+p_phylum <- ggplot(df_phylum, aes(y = Species, x = 1, fill = Phylum)) +
+  geom_tile(color = "white", width = 0.8) +
+  scale_fill_manual(values = phylum_colors, drop = FALSE) +
+  theme_void(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  )
+
+##  Right panel
+df_prev <- df %>%
+  dplyr::select(Species, `<50`, `>=50`) %>%
+  tidyr::pivot_longer(
+    cols      = c(`<50`, `>=50`),
+    names_to  = "Group",
+    values_to = "Prevalence"
+  ) %>%
+  mutate(
+    Species = factor(Species, levels = levels(df$Species)),
+    Group   = factor(Group, levels = c("<50", ">=50"))
+  )
+
+#
+bottom_labels <- c(
+  "<50"  = "Prevalence in <50 (%)",
+  ">=50" = "Prevalence in ≥50 (%)"
+)
+df_prev$Group <- as.character(df_prev$Group)
+df_prev$Group[df_prev$Group == "Prevalence in <50 (%)"]  <- "<50"
+df_prev$Group[df_prev$Group == "Prevalence in ≥50 (%)"] <- ">=50"
+df_prev$Group <- factor(df_prev$Group, levels = c("<50", ">=50"))
+
+p_prev <- ggplot(df_prev,
+                 aes(x = Prevalence, y = Species, fill = Group)) +
+  geom_col(color = NA, width = 0.7) +
+  scale_fill_manual(values = prev_cols, guide = "none") +
+  facet_grid(. ~ Group, switch = "x",
+             labeller = labeller(Group = bottom_labels)) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid       = element_blank(),
+    panel.border     = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.text.y      = element_blank(),
+    axis.ticks.y     = element_blank(),
+    axis.text.x      = element_text(color = "black"),
+    strip.placement  = "outside",
+    strip.background = element_rect(fill = "white", color = "white"),
+    axis.title.x     = element_blank(),
+    axis.title.y     = element_blank()
+  )
+
+##  Merge 
+library(cowplot)
+p_all <- plot_grid(
+  p_coef,
+  p_phylum,
+  p_prev,
+  nrow = 1,
+  align = "h",
+  axis  = "tb",
+  rel_widths = c(1.3, 0.05, 0.8)
+)
+p_all
+ggsave('../Output/Maaslin3/p_age_all.pdf', p_all, width = 7, height = 4)
+```
+
+# race
+```{r}
+
+## meta
+physeq <- readRDS("../Output/physeq.rds")
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+otu  <- as.data.frame(t(otu_table(physeq)))
+tax  <- as.data.frame(tax_table(physeq))
+
+## Maaslin3 result for RACE
+file_race <- "../Output/Maaslin3/race_only_0.5/all_results.tsv"
+df <- read_tsv(file_race, show_col_types = FALSE)
+
+## Keep only abundance rows
+df <- df %>% filter(str_detect(model, "abundance"))
+
+## Extract species name
+df$Species <- sapply(strsplit(df$feature, ";"), tail, 1)
+df$Species <- gsub("_", " ", df$Species)
+
+## Extract phylum
+df$Phylum <- sapply(strsplit(df$feature, ";"), function(x) x[2])
+
+## Sort by coefficient
+df <- df %>% arrange(coef)
+df$Species <- factor(df$Species, levels = df$Species)
+
+
+## prevalence for race
+taxa_keep <- df$feature
+otu_sub <- otu[, taxa_keep, drop = FALSE]
+
+calc_prev <- function(vec, grp) tapply(vec > 0, grp, mean) * 100
+prev_mat  <- sapply(otu_sub, calc_prev, grp = meta$race)
+prev_df   <- as.data.frame(t(prev_mat))
+
+prev_df$feature <- rownames(prev_df)
+colnames(prev_df)[1:2] <- c("Black", "White")
+
+df <- df %>% left_join(prev_df, by = "feature")
+
+## Prevalence long format
+df_prev <- df %>%
+  select(Species, Black, White) %>%
+  pivot_longer(cols = c(Black, White),
+               names_to = "Group",
+               values_to = "Prevalence") %>%
+  mutate(
+    Species = factor(Species, levels = levels(df$Species)),
+    Group   = factor(Group, levels = c("Black", "White"))
+  )
+
+
+## Colors
+## coef sign 
+df$coef_dir <- ifelse(df$coef >= 0, "pos", "neg")
+df$coef_dir <- factor(df$coef_dir, levels = c("neg", "pos"))
+
+coef_cols <- c(
+  "neg" = "#83B4E1",  
+  "pos" = "#1F5A97"   
+)
+
+## significant star
+df$signif <- df$qval_joint < 0.25
+
+## phylum 
+phylum_colors <- c(
+  "Proteobacteria"   = "#D7B348",
+  "Firmicutes"       = "#308178",
+  "Actinobacteriota" = "#D45740"
+)
+
+## prevalence  
+prev_cols <- c(
+  "Black" = "#83B4E1",
+  "White" = "#1F5A97"
+)
+
+bottom_labels <- c(
+  "Black" = "Prevalence in Black (%)",
+  "White" = "Prevalence in White (%)"
+)
+
+
+## Left
+p_coef <- ggplot(df, aes(y = Species)) +
+  geom_segment(aes(
+    x = 0, xend = coef,
+    yend = Species,
+    color = coef_dir
+  ), linewidth = 1.0) +
+  geom_point(aes(x = coef, color = coef_dir), size = 3) +
+  geom_text(
+    data = subset(df, signif),
+    aes(x = coef, y = Species, label = "*"),
+    nudge_x = 0.02 * diff(range(df$coef, na.rm = TRUE)),
+    size = 3
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  scale_color_manual(values = coef_cols, guide = "none") +
+  labs(x = "Coefficient", y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid  = element_blank(),
+    axis.text.y = element_text(face = "italic", color = "black"),
+    axis.text.x = element_text(color = "black")
+  )
+
+
+## Middle:
+df_phylum <- df %>% select(Species, Phylum)
+
+p_phylum <- ggplot(df_phylum, aes(y = Species, x = 1, fill = Phylum)) +
+  geom_tile(color = "white", width = 0.8) +
+  scale_fill_manual(values = phylum_colors) +
+  theme_void(base_size = 12) +
+  theme(legend.position = "none")
+
+
+## Right
+p_prev <- ggplot(df_prev,
+                 aes(x = Prevalence, y = Species, fill = Group)) +
+  geom_col(color = NA, width = 0.7) +
+  scale_fill_manual(values = prev_cols, guide = "none") +
+  facet_grid(. ~ Group, switch = "x",
+             labeller = labeller(Group = bottom_labels)) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid       = element_blank(),
+    panel.border     = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.text.y      = element_blank(),
+    axis.ticks.y     = element_blank(),
+    axis.text.x      = element_text(color = "black"),
+    strip.placement  = "outside",
+    strip.background = element_rect(fill = "white", color = "white"),
+    axis.title.x     = element_blank(),
+    axis.title.y     = element_blank()
+  )
+
+
+## Merge
+library(cowplot)
+p_all <- plot_grid(
+  p_coef,
+  p_phylum,
+  p_prev,
+  nrow = 1,
+  align = "h",
+  axis  = "tb",
+  rel_widths = c(1.3, 0.05, 0.8)
+)
+
+p_all
+ggsave('../Output/Maaslin3/p_race_all.pdf', p_all, width = 7, height = 4)
+```
+
+# ER
+```{r}
+
+## meta
+physeq <- readRDS("../Output/physeq.rds")
+
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+otu  <- as.data.frame(t(otu_table(physeq)))
+tax  <- as.data.frame(tax_table(physeq))
+
+
+## Maaslin3 result for ER
+
+file_er <- "../Output/Maaslin3/ER_only_0.5/all_results.tsv"
+df <- read_tsv(file_er, show_col_types = FALSE)
+
+## Keep only abundance rows
+df <- df %>% filter(str_detect(model, "abundance"))
+
+## Extract species name
+df$Species <- sapply(strsplit(df$feature, ";"), tail, 1)
+df$Species <- gsub("_", " ", df$Species)
+
+## Extract phylum
+df$Phylum <- sapply(strsplit(df$feature, ";"), function(x) x[2])
+
+## Sort by coefficient
+df <- df %>% arrange(coef)
+df$Species <- factor(df$Species, levels = df$Species)
+
+
+## prevalence 
+taxa_keep <- df$feature
+otu_sub <- otu[, taxa_keep, drop = FALSE]
+
+calc_prev <- function(vec, grp) tapply(vec > 0, grp, mean) * 100
+prev_mat  <- sapply(otu_sub, calc_prev, grp = meta$ER)
+prev_df   <- as.data.frame(t(prev_mat))
+
+prev_df$feature <- rownames(prev_df)
+colnames(prev_df)[1:2] <- c("Positive", "Negative")
+
+df <- df %>% left_join(prev_df, by = "feature")
+
+## Prevalence long-format
+df_prev <- df %>%
+  select(Species, Negative, Positive) %>%
+  pivot_longer(cols = c(Negative, Positive),
+               names_to = "Group",
+               values_to = "Prevalence") %>%
+  mutate(
+    Species = factor(Species, levels = levels(df$Species)),
+    Group   = factor(Group, levels = c("Negative", "Positive"))
+  )
+
+
+##  Colors
+## coefficient
+df$coef_dir <- ifelse(df$coef >= 0, "pos", "neg")
+df$coef_dir <- factor(df$coef_dir, levels = c("neg", "pos"))
+
+coef_cols <- c(
+  "neg" = "#C6A7E8",  
+  "pos" = "#5D3F8C"   
+)
+
+## Significance star
+df$signif <- df$qval_joint < 0.25
+
+## Phylum colors
+phylum_colors <- c(
+  "Proteobacteria"   = "#D7B348",
+  "Firmicutes"       = "#308178",
+  "Actinobacteriota" = "#D45740"
+)
+
+## Prevalence 
+prev_cols <- c(
+  "Negative" = "#C6A7E8",
+  "Positive" = "#5D3F8C"
+)
+
+## Strip labels
+bottom_labels <- c(
+  "Negative" = "Prevalence in Negative (%)",
+  "Positive" = "Prevalence in Positive (%)"
+)
+
+##  Left panel
+p_coef <- ggplot(df, aes(y = Species)) +
+  geom_segment(aes(
+    x = 0, xend = coef,
+    yend = Species,
+    color = coef_dir
+  ), linewidth = 1.0) +
+  geom_point(aes(x = coef, color = coef_dir), size = 3) +
+  geom_text(
+    data = subset(df, signif),
+    aes(x = coef, y = Species, label = "*"),
+    nudge_x = 0.02 * diff(range(df$coef, na.rm = TRUE)),
+    size = 3
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  scale_color_manual(values = coef_cols, guide = "none") +
+  labs(x = "Coefficient", y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.y = element_text(face = "italic", color = "black"),
+    axis.text.x = element_text(color = "black")
+  )
+
+
+## Middle
+df_phylum <- df %>% select(Species, Phylum)
+
+p_phylum <- ggplot(df_phylum, aes(y = Species, x = 1, fill = Phylum)) +
+  geom_tile(color = "white", width = 0.8) +
+  scale_fill_manual(values = phylum_colors) +
+  theme_void(base_size = 12) +
+  theme(legend.position = "none")
+
+
+##  Right 
+df_prev$Group <- factor(df_prev$Group, levels = c("Negative", "Positive"))
+
+p_prev <- ggplot(df_prev,
+                 aes(x = Prevalence, y = Species, fill = Group)) +
+  geom_col(color = NA, width = 0.7) +
+  scale_fill_manual(values = prev_cols, guide = "none") +
+  facet_grid(. ~ Group, switch = "x",
+             labeller = labeller(Group = bottom_labels)) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(color = "black"),
+    strip.placement = "outside",
+    strip.background = element_rect(fill = "white", color = "white"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+
+## Merge
+library(cowplot)
+
+p_er <- plot_grid(
+  p_coef,
+  p_phylum,
+  p_prev,
+  nrow = 1,
+  align = "h",
+  axis  = "tb",
+  rel_widths = c(1.3, 0.05, 0.8)
+)
+
+p_er
+ggsave('../Output/Maaslin3/p_ER_all.pdf', p_er, width = 7, height = 4)
+```
+
+# ctc
+```{r}
+
+## meta
+physeq <- readRDS("../Output/physeq.rds")
+
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+
+## filter NA 
+meta <- meta %>%
+  mutate(
+    ctc2 = case_when(
+      CTC_count_cat %in% c("0", "0-5") ~ "0–5",
+      CTC_count_cat %in% c(">5")       ~ ">5",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(ctc2))
+
+meta$ctc2 <- factor(meta$ctc2, levels = c("0–5", ">5"))
+
+otu  <- as.data.frame(t(otu_table(physeq)))[rownames(meta), , drop = FALSE]
+tax  <- as.data.frame(tax_table(physeq))
+
+## Maaslin3 result for CTC2
+file_ctc <- "../Output/Maaslin3/ctc2_only_0.5/all_results.tsv"
+df <- read_tsv(file_ctc, show_col_types = FALSE)
+
+df <- df %>% filter(str_detect(model, "abundance"))
+
+df$Species <- sapply(strsplit(df$feature, ";"), tail, 1)
+df$Species <- gsub("_", " ", df$Species)
+
+df$Phylum <- sapply(strsplit(df$feature, ";"), function(x) x[2])
+
+df <- df %>% arrange(coef)
+df$Species <- factor(df$Species, levels = df$Species)
+
+
+## Prevalence 
+taxa_keep <- df$feature
+otu_sub <- otu[, taxa_keep, drop = FALSE]
+
+calc_prev <- function(vec, grp) tapply(vec > 0, grp, mean) * 100
+prev_mat  <- sapply(otu_sub, calc_prev, grp = meta$ctc2)
+prev_df   <- as.data.frame(t(prev_mat))
+
+prev_df$feature <- rownames(prev_df)
+colnames(prev_df)[1:2] <- c("0–5", ">5")
+
+df <- df %>% left_join(prev_df, by = "feature")
+
+df_prev <- df %>%
+  select(Species, `0–5`, `>5`) %>%
+  pivot_longer(cols = c(`0–5`, `>5`),
+               names_to = "Group",
+               values_to = "Prevalence") %>%
+  mutate(
+    Species = factor(Species, levels = levels(df$Species)),
+    Group   = factor(Group, levels = c("0–5", ">5"))
+  )
+
+
+##  Colors
+## Coef 
+df$coef_dir <- ifelse(df$coef >= 0, "pos", "neg")
+df$coef_dir <- factor(df$coef_dir, levels = c("neg", "pos"))
+## CTC color 
+ctc_cols <- c(
+  "neg" = "#F7A280",   
+  "pos" = "#B33C1E"   
+)
+prev_cols <- c(
+  "0–5" = "#F7A280",
+  ">5"  = "#B33C1E"
+)
+## Significance star
+df$signif <- df$qval_joint < 0.25
+## Phylum colors
+phylum_colors <- c(
+  "Proteobacteria"   = "#D7B348",
+  "Firmicutes"       = "#308178",
+  "Actinobacteriota" = "#D45740"
+)
+## Strip labels
+bottom_labels <- c(
+  "0–5" = "Prevalence in 0–5 (%)",
+  ">5"  = "Prevalence in >5 (%)"
+)
+
+
+## Left 
+p_coef <- ggplot(df, aes(y = Species)) +
+  geom_segment(aes(
+    x = 0, xend = coef,
+    yend = Species,
+    color = coef_dir
+  ), linewidth = 1.0) +
+  
+  geom_point(aes(x = coef, color = coef_dir), size = 3) +
+
+  geom_text(
+    data = subset(df, signif),
+    aes(x = coef, y = Species, label = "*"),
+    nudge_x = 0.02 * diff(range(df$coef, na.rm = TRUE)),
+    size = 3
+  ) +
+
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40") +
+  scale_color_manual(values = ctc_cols, guide = "none") +
+
+  labs(x = "Coefficient", y = NULL) +
+
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.y = element_text(face = "italic", color = "black"),
+    axis.text.x = element_text(color = "black")
+  )
+
+## Middle
+df_phylum <- df %>% select(Species, Phylum)
+
+p_phylum <- ggplot(df_phylum, aes(y = Species, x = 1, fill = Phylum)) +
+  geom_tile(color = "white", width = 0.8) +
+  scale_fill_manual(values = phylum_colors) +
+  theme_void(base_size = 12) +
+  theme(legend.position = "none")
+
+
+## Right
+p_prev <- ggplot(df_prev,
+                 aes(x = Prevalence, y = Species, fill = Group)) +
+  geom_col(color = NA, width = 0.7) +
+  scale_fill_manual(values = prev_cols, guide = "none") +
+  
+  facet_grid(. ~ Group, switch = "x",
+             labeller = labeller(Group = bottom_labels)) +
+  
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(color = "black"),
+    strip.placement = "outside",
+    strip.background = element_rect(fill = "white", color = "white"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  )
+
+
+## merge
+library(cowplot)
+
+p_ctc <- plot_grid(
+  p_coef,
+  p_phylum,
+  p_prev,
+  nrow = 1,
+  align = "h",
+  axis  = "tb",
+  rel_widths = c(1.3, 0.05, 0.8)
+)
+
+p_ctc
+ggsave('../Output/Maaslin3/p_ctc_all.pdf', p_ctc, width = 7, height = 4)
+```
+
+#color legend
+```{r}
+phylum_colors <- c(
+  "Proteobacteria"   = "#D7B348",
+  "Firmicutes"       = "#308178",
+  "Actinobacteriota" = "#D45740"
+)
+
+library(ggplot2)
+
+df_legend_phy <- data.frame(
+  Phylum = names(phylum_colors),
+  x = 1, y = 1:length(phylum_colors)
+)
+
+p_legend_phy <- ggplot(df_legend_phy, aes(x = x, y = y, fill = Phylum)) +
+  geom_tile(width = 0.8, height = 0.8) +
+  scale_fill_manual(values = phylum_colors) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text  = element_text(size = 12)
+  )
+
+# Save legend only
+legend_phy <- cowplot::get_legend(
+  p_legend_phy + guides(fill = guide_legend(title = "Phylum"))
+)
+
+ggsave("../Output/Maaslin3/legend_phylum.pdf",
+       legend_phy, width = 3, height = 3)
+
+# group legend
+age_cols <- c("<50" = "#D5A021", ">=50" = "#6C4E09")
+race_cols <- c("Black" = "#83B4E1", "White" = "#1F5A97")
+er_cols <- c("Negative" = "#C6A7E8", "Positive" = "#5D3F8C")
+ctc_cols <- c("0–5" = "#F7A280", ">5" = "#B33C1E")
+make_legend <- function(col_vec, title) {
+  df <- data.frame(
+    Group = names(col_vec),
+    x = 1, y = seq_along(col_vec)
+  )
+  p <- ggplot(df, aes(x=x, y=y, fill=Group)) +
+    geom_tile(width=0.8, height=0.8) +
+    scale_fill_manual(values = col_vec) +
+    theme_void()
+  
+  cowplot::get_legend(
+    p + guides(fill = guide_legend(title = title))
+  )
+}
+
+legend_age  <- make_legend(age_cols,  "Age at MBC diagnosis")
+legend_race <- make_legend(race_cols, "Race")
+legend_er   <- make_legend(er_cols,   "ER status")
+legend_ctc  <- make_legend(ctc_cols,  "CTC categories")
+
+legend_all <- cowplot::plot_grid(
+  legend_age, legend_race, legend_er, legend_ctc,
+  ncol = 1, align = "v"
+)
+
+ggsave("../Output/Maaslin3/legend_groups_all.pdf",
+       legend_all, width = 4, height = 8)
+
+```
+

@@ -1,0 +1,106 @@
+---
+title: "Table 1"
+author: "XYM"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# table 1 
+```{r}
+library(tableone)
+library(crosstable)
+#merge meta and a diversity table
+physeq_alpha_div <- read.csv('../Output/physeq_alpha_div.csv')
+physeq_alpha_div <- physeq_alpha_div[, 1:(which(names(physeq_alpha_div) == "Patient_id") - 1)]
+# merge meta and a diversity
+physeq_alpha_div <- merge(physeq_alpha_div, meta, by = 'Sample_id')
+
+
+# add Tumor stage IV info
+physeq_alpha_div <- as.data.frame(physeq_alpha_div)
+names(physeq_alpha_div) <- make.unique(names(physeq_alpha_div))
+physeq_alpha_div <- physeq_alpha_div %>% 
+  mutate(Tumor_stage_IV = "Y")
+
+# export
+write.csv(physeq_alpha_div, '../Output/physeq_alpha_div.csv')
+
+vars_table1 <- c(
+  "age_MBC_dx",                 
+  "race",
+  "Menopausal_status",
+  "BMI_cat",
+  "Family.history.of.BC",     
+  "Smoking",
+  "Alcohol",
+  "Tumor_stage_IV",
+  "ER",
+  "TNBC",
+  "Pre.enrollment_surgery",
+  "Pre.enrollment_Chemotherapy",
+  "Pre.enrollment_Radiation",
+  "Pre.enrollment_Hormonal.Therapy",
+  "Pre.enrollment_Targeted.Therapy",
+  "survival_months",           
+  "vital",
+  "CTC_count_cat",              
+  "diversity_shannon",
+  "chao1"
+)
+# crosstable
+tab1 <- crosstable(
+  data = physeq_alpha_div,
+  cols = all_of(vars_table1),
+  by = NULL,
+  test = FALSE      
+)
+
+ft <- as_flextable(tab1)
+ft
+
+flextable::save_as_docx(ft, path = "../Output/Table1_output.docx")
+
+#tableone
+factor_vars <- c(
+  "race","Menopausal_status","BMI_cat",
+  "Family.history.of.BC","Smoking","Alcohol",
+  "Tumor_stage_IV","ER","TNBC",
+  "Pre.enrollment_surgery","Pre.enrollment_Chemotherapy",
+  "Pre.enrollment_Radiation","Pre.enrollment_Hormonal.Therapy",
+  "Pre.enrollment_Targeted.Therapy",
+  "vital","CTC_count_cat"
+)
+
+physeq_alpha_div[factor_vars] <- lapply(physeq_alpha_div[factor_vars], factor)
+tab1.2 <- CreateTableOne(
+  vars = vars_table1,
+  data = physeq_alpha_div,
+  factorVars = factor_vars,
+  includeNA = TRUE
+)
+print(tab1.2, showAllLevels = TRUE, quote = TRUE, noSpaces = TRUE)
+
+tab1_df <- as.data.frame(
+  print(tab1.2, showAllLevels = TRUE, printToggle = FALSE)
+) %>% 
+  tibble::rownames_to_column("Variable")
+
+# change flextable
+library(flextable)
+ft <- flextable(tab1_df)
+ft <- theme_booktabs(ft)  
+ft <- autofit(ft)
+ft <- bold(ft, part = "header")
+
+save_as_docx(
+  "Table 1" = ft,
+  path = "../Output/Table1_three_line.docx"
+)
+```
+
+
+

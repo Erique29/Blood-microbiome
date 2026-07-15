@@ -1,0 +1,384 @@
+---
+title: "beta diversity"
+author: "XYM"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#continue
+```{r}
+#continue
+physeq <- readRDS('../Output/physeq.rds')
+# otu_table()   OTU Table:         [ 1671 taxa and 38 samples ]
+# sample_data() Sample Data:       [ 38 samples by 28 sample variables ]
+# tax_table()   Taxonomy Table:    [ 1671 taxa by 7 taxonomic ranks ]
+```
+
+#Fig 3
+#Beta diversity- age group
+```{r}
+#Beta diversity-age group
+# 
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+
+# meta <- meta %>%
+#   mutate(age_group = ifelse(age_MBC_dx < 50, "<50", "≥50"))
+# 
+# sample_data(physeq) <- meta
+
+#  Define grouping variable
+group_col <- "age_group"
+
+#  Color palette
+age_colors <- c("<50" = "#D5A021", ">=50" = "#6C4E09")
+
+#  Check groups
+unique(sample_data(physeq)[[group_col]])
+
+#  Compute Bray–Curtis distance
+dist_bc <- phyloseq::distance(physeq, method = "bray")
+
+#  PCoA ordination
+ord_pcoa <- ordinate(physeq, method = "PCoA", distance = dist_bc)
+
+#  Extract % variance explained by each axis
+eig_vals <- ord_pcoa$values$Eigenvalues
+axis_var <- eig_vals / sum(eig_vals) * 100
+x_lab <- paste0("PCoA1 (", round(axis_var[1], 2), "%)")
+y_lab <- paste0("PCoA2 (", round(axis_var[2], 2), "%)")
+
+#  PERMANOVA test
+set.seed(123)
+meta_df <- data.frame(sample_data(physeq))
+adonis_res <- adonis2(dist_bc ~ age_group, data = meta_df, permutations = 999)
+
+#  Extract R² and p-value
+R2_value <- adonis_res$R2[1]
+p_value  <- adonis_res$`Pr(>F)`[1]
+
+# Format nicely for annotation
+R2_label <- paste0("R² = ", sprintf("%.3f", R2_value))
+p_label  <- paste0("p = ", ifelse(p_value < 0.001, "<0.001", sprintf("%.3f", p_value)))
+annot_text <- paste("PERMANOVA", R2_label, p_label, sep = ", ")
+
+print(adonis_res)
+cat("Extracted values:", annot_text, "\n")
+
+#  Plot PCoA
+p_pcoa_age <- plot_ordination(physeq, ord_pcoa, color = group_col) +
+  geom_point(size = 4, alpha = 0.85) +
+  stat_ellipse(aes(color = !!sym(group_col)), type = "t", linetype = 2) +
+  theme_bw(base_size = 14) +
+  scale_color_manual(values = age_colors) +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  ggtitle("Age at MBC diagnosis") +
+   xlab(x_lab) + 
+  ylab(y_lab) +
+  annotate("text", x = Inf, y = Inf,
+           label = annot_text,
+           hjust = 1.1, vjust = 1.5,
+           size = 4.5)+
+  theme(
+  legend.position = c(0.98, 0.05),
+  legend.justification = c("right", "bottom"),
+  legend.background = element_rect(fill = scales::alpha("white", 0.6), color = NA)
+)
+
+#  Display and save
+p_pcoa_age
+ggsave("../Output/Plots/p_PCoA_BrayCurtis_age_group.pdf",
+       p_pcoa_age, width = 8, height = 6)
+```
+
+#Beta diversity- race group
+```{r}
+#Beta diversity-race group
+# 
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+
+#  Define grouping variable
+group_col <- "race"
+
+#  Color palette
+race_colors <- c("Black" = "#1F5A97",
+               "White" = "#83B4E1")
+
+#  Check groups
+unique(sample_data(physeq)[[group_col]])
+
+#  Compute Bray–Curtis distance
+dist_bc <- phyloseq::distance(physeq, method = "bray")
+
+#  PCoA ordination
+ord_pcoa <- ordinate(physeq, method = "PCoA", distance = dist_bc)
+
+#  Extract % variance explained by each axis
+eig_vals <- ord_pcoa$values$Eigenvalues
+axis_var <- eig_vals / sum(eig_vals) * 100
+x_lab <- paste0("PCoA1 (", round(axis_var[1], 2), "%)")
+y_lab <- paste0("PCoA2 (", round(axis_var[2], 2), "%)")
+
+#  PERMANOVA test
+set.seed(123)
+meta_df <- data.frame(sample_data(physeq))
+adonis_res <- adonis2(dist_bc ~ race, data = meta_df, permutations = 999)
+
+#  Extract R² and p-value
+R2_value <- adonis_res$R2[1]
+p_value  <- adonis_res$`Pr(>F)`[1]
+
+# Format nicely for annotation
+R2_label <- paste0("R² = ", sprintf("%.3f", R2_value))
+p_label  <- paste0("p = ", ifelse(p_value < 0.001, "<0.001", sprintf("%.3f", p_value)))
+annot_text <- paste("PERMANOVA", R2_label, p_label, sep = ", ")
+
+print(adonis_res)
+cat("Extracted values:", annot_text, "\n")
+
+#  Plot PCoA
+p_pcoa_race <- plot_ordination(physeq, ord_pcoa, color = group_col) +
+  geom_point(size = 4, alpha = 0.85) +
+  stat_ellipse(aes(color = !!sym(group_col)), type = "t", linetype = 2) +
+  theme_bw(base_size = 14) +
+  scale_color_manual(values = race_colors) +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  ggtitle("Race") +
+   xlab(x_lab) + 
+  ylab(y_lab) +
+  annotate("text", x = Inf, y = Inf,
+           label = annot_text,
+           hjust = 1.1, vjust = 1.5,
+           size = 4.5)+
+  theme(
+  legend.position = c(0.98, 0.05),
+  legend.justification = c("right", "bottom"),
+  legend.background = element_rect(fill = scales::alpha("white", 0.6), color = NA)
+)
+
+#  Display and save
+p_pcoa_race
+ggsave("../Output/Plots/p_PCoA_BrayCurtis_race_group.pdf",
+       p_pcoa_race, width = 8, height = 6)
+```
+
+#Beta diversity- ER group
+```{r}
+#Beta diversity-ER group
+# 
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+
+meta$ER <- recode(meta$ER,
+                  "N" = "Negative",
+                  "Y" = "Positive")
+
+sample_data(physeq)$ER <- meta$ER
+#  Define grouping variable
+group_col <- "ER"
+
+#  Color palette
+ER_colors <- c("Negative" = "#C6A7E8",
+             "Positive" = "#5D3F8C")
+
+#  Check groups
+unique(sample_data(physeq)[[group_col]])
+
+#  Compute Bray–Curtis distance
+dist_bc <- phyloseq::distance(physeq, method = "bray")
+
+#  PCoA ordination
+ord_pcoa <- ordinate(physeq, method = "PCoA", distance = dist_bc)
+
+#  Extract % variance explained by each axis
+eig_vals <- ord_pcoa$values$Eigenvalues
+axis_var <- eig_vals / sum(eig_vals) * 100
+x_lab <- paste0("PCoA1 (", round(axis_var[1], 2), "%)")
+y_lab <- paste0("PCoA2 (", round(axis_var[2], 2), "%)")
+
+#  PERMANOVA test
+set.seed(123)
+meta_df <- data.frame(sample_data(physeq))
+adonis_res <- adonis2(dist_bc ~ ER, data = meta_df, permutations = 999)
+
+#  Extract R² and p-value
+R2_value <- adonis_res$R2[1]
+p_value  <- adonis_res$`Pr(>F)`[1]
+
+# Format nicely for annotation
+R2_label <- paste0("R² = ", sprintf("%.3f", R2_value))
+p_label  <- paste0("p = ", ifelse(p_value < 0.001, "<0.001", sprintf("%.3f", p_value)))
+annot_text <- paste("PERMANOVA", R2_label, p_label, sep = ", ")
+
+print(adonis_res)
+cat("Extracted values:", annot_text, "\n")
+
+#  Plot PCoA
+p_pcoa_ER <- plot_ordination(physeq, ord_pcoa, color = group_col) +
+  geom_point(size = 4, alpha = 0.85) +
+  stat_ellipse(aes(color = !!sym(group_col)), type = "t", linetype = 2) +
+  theme_bw(base_size = 14) +
+  scale_color_manual(values = ER_colors) +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  ggtitle("ER status") +
+   xlab(x_lab) + 
+  ylab(y_lab) +
+  annotate("text", x = Inf, y = Inf,
+           label = annot_text,
+           hjust = 1.1, vjust = 1.5,
+           size = 4.5)+
+  theme(
+  legend.position = c(0.98, 0.05),
+  legend.justification = c("right", "bottom"),
+  legend.background = element_rect(fill = scales::alpha("white", 0.6), color = NA)
+)
+
+#  Display and save
+p_pcoa_ER
+ggsave("../Output/Plots/p_PCoA_BrayCurtis_ER_group.pdf",
+       p_pcoa_ER, width = 8, height = 6)
+```
+
+#Beta diversity- CTC group
+```{r}
+#Beta diversity-ctc group
+# 
+meta <- data.frame(sample_data(physeq), check.names = FALSE)
+
+meta <- meta %>%
+  mutate(
+    ctc2 = case_when(
+      CTC_count_cat %in% c("0", "0-5") ~ "0–5",
+      CTC_count_cat %in% c(">5")  ~ ">5",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(ctc2))
+
+keep_samples <- rownames(meta)
+
+physeq_filtered <- prune_samples(keep_samples, physeq)
+sample_data(physeq_filtered)$ctc2 <- meta$ctc2
+stopifnot(all(rownames(meta) == sample_names(physeq_filtered)))
+
+dist_bc <- phyloseq::distance(physeq_filtered, method = "bray")
+# PERMANOVA
+# ============================================================
+set.seed(123)
+adonis_res <- adonis2(dist_bc ~ ctc2, data = meta, permutations = 999)
+
+
+# get R2 and p
+R2_value <- adonis_res$R2[1]
+p_value  <- adonis_res$`Pr(>F)`[1]
+
+R2_label <- paste0("R² = ", sprintf("%.3f", R2_value))
+p_label  <- paste0("p = ",
+                   ifelse(p_value < 0.001, "<0.001", sprintf("%.3f", p_value))
+                   )
+
+annot_text <- paste("PERMANOVA", R2_label, p_label, sep = ", ")
+
+
+#  Define grouping variable
+group_col <- "ctc2"
+
+#  Color palette
+ctc_colors <- c("0–5" = "#F7A280",
+             ">5" = "#B33C1E")
+
+#  PCoA ordination
+ord_pcoa <- ordinate(physeq_filtered, method = "PCoA", distance = dist_bc)
+
+eig_vals <- ord_pcoa$values$Eigenvalues
+axis_var <- eig_vals / sum(eig_vals) * 100
+
+x_lab <- paste0("PCoA1 (", round(axis_var[1], 2), "%)")
+y_lab <- paste0("PCoA2 (", round(axis_var[2], 2), "%)")
+
+
+#  Plot PCoA
+p_pcoa_ctc <- plot_ordination(physeq_filtered, ord_pcoa, color = group_col) +
+  geom_point(size = 4, alpha = 0.85) +
+  stat_ellipse(aes(color = !!sym(group_col)), type = "t", linetype = 2) +
+  theme_bw(base_size = 14) +
+  scale_color_manual(values = ctc_colors) +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_blank(),
+    #legend.position = "right",
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  ggtitle("CTCs categories") +
+   xlab(x_lab) + 
+  ylab(y_lab) +
+  annotate("text", x = Inf, y = Inf,
+           label = annot_text,
+           hjust = 1.1, vjust = 1.5,
+           size = 4.5)+
+  theme(
+  legend.position = c(0.98, 0.05),
+  legend.justification = c("right", "bottom"),
+  legend.background = element_rect(fill = scales::alpha("white", 0.6), color = NA)
+)
+
+#  Display and save
+p_pcoa_ctc
+ggsave("../Output/Plots/p_PCoA_BrayCurtis_ctc_group.pdf",
+       p_pcoa_ctc, width = 8, height = 6)
+```
+
+
+
+# merge beta plots
+```{r}
+# p_beta_div_merged <- 
+#   (p_pcoa_age + p_pcoa_race) /
+#   (p_pcoa_ER + p_pcoa_sample_type) +
+#   #plot_layout(guides = "collect") +     
+#   plot_annotation(tag_levels = "A")
+# p_beta_div_merged
+# 
+# ggsave("../Output/Plots/p_beta_div_merged.pdf",
+#        p_beta_div_merged,
+#        width = 11, height = 8.5)
+
+# alian box
+library(cowplot)
+plots_aligned_b <- align_plots(
+  p_pcoa_age,
+  p_pcoa_race,
+  p_pcoa_ER,
+  p_pcoa_ctc,
+  align = "hv", axis = "tblr"
+)
+
+p_beta_div_merged2 <- plot_grid(
+  plots_aligned_b[[1]], plots_aligned_b[[2]],
+  plots_aligned_b[[3]], plots_aligned_b[[4]],
+  labels = "AUTO",
+  ncol = 2,
+  label_size = 16
+)
+
+ggsave("../Output/Plots/p_beta_div_merged2.pdf",
+       p_beta_div_merged2,
+       width = 9, height = 8.5)
+```
+
